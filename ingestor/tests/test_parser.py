@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from fake_firmware import BOOT_LOG, HEADER_C5C6, HEADER_LEGACY, c5c6_line, legacy_line
-from parser import parse_line
+from parser import COLUMNS_C5C6, COLUMNS_LEGACY, DropReason, MalformedLine, parse_line
 
 DATA = Path(__file__).parent / "data"
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
@@ -12,6 +12,12 @@ NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
 
 def parse(line):
     return parse_line(line, NOW)
+
+
+def drop_reason(line):
+    with pytest.raises(MalformedLine) as excinfo:
+        parse(line)
+    return excinfo.value.reason
 
 
 # Real example lines from the esp-csi get-started README
@@ -31,7 +37,7 @@ def test_readme_c5c6_line():
     assert record.agc_gain == 4
     assert len(record.csi) == 256
     assert record.csi[12:14] == [-6, -13]
-    assert record.extra == {"rate": 11, "sig_len": 47, "rx_state": 0}
+    assert record.extra == {"rate": 11, "sig_len": 47, "rx_format": 0}
 
 
 def test_readme_legacy_line():
@@ -52,8 +58,18 @@ def test_readme_legacy_line():
     assert record.extra["secondary_channel"] == 2
     assert set(record.extra) == {
         "rate", "sig_mode", "mcs", "bandwidth", "smoothing", "not_sounding", "aggregation",
-        "stbc", "fec_coding", "sgi", "ampdu_cnt", "secondary_channel", "ant", "sig_len", "rx_state",
+        "stbc", "fec_coding", "sgi", "ampdu_cnt", "secondary_channel", "ant", "sig_len", "rx_format",
     }
+
+
+# Our column names should match the header the firmware prints, apart from id -> seq
+
+@pytest.mark.parametrize("header, columns", [
+    (HEADER_C5C6, COLUMNS_C5C6),
+    (HEADER_LEGACY, COLUMNS_LEGACY),
+])
+def test_columns_match_firmware_header(header, columns):
+    assert header.replace("type,id,", "type,seq,").split(",") == columns
 
 
 # Lines that aren't CSI records
@@ -74,30 +90,50 @@ def test_stream_keeps_only_csi_lines():
 @pytest.mark.parametrize("line", [c5c6_line(), legacy_line()])
 def test_truncated_lines_are_rejected(line):
     for cut in (len(line) // 3, len(line) // 2, len(line) - 3):
-        assert parse(line[:cut]) is None
+        with pytest.raises(MalformedLine):
+            parse(line[:cut])
+
+
+def test_line_cut_inside_data_is_bad_json():
+    line = c5c6_line()
+    assert drop_reason(line[:-3]) is DropReason.BAD_JSON
+
+
+def test_line_cut_before_data_is_column_count():
+    line = c5c6_line()
+    assert drop_reason(line[:line.index('"') - 5]) is DropReason.COLUMN_COUNT
 
 
 def test_length_mismatch_is_rejected():
-    assert parse(c5c6_line(csi=[1, 2, 3, 4], length=6)) is None
+    assert drop_reason(c5c6_line(csi=[1, 2, 3, 4], length=6)) is DropReason.LENGTH_MISMATCH
 
 
 def test_wrong_column_count_is_rejected():
     line = c5c6_line()
-    assert parse(line.replace("CSI_DATA,", "CSI_DATA,99,", 1)) is None
+    assert drop_reason(line.replace("CSI_DATA,", "CSI_DATA,99,", 1)) is DropReason.COLUMN_COUNT
 
 
 def test_non_numeric_field_is_rejected():
-    assert parse(c5c6_line(rssi="x")) is None
+    assert drop_reason(c5c6_line(rssi="x")) is DropReason.BAD_FIELD
+
+
+def test_non_numeric_length_is_rejected():
+    assert drop_reason(c5c6_line(csi=[1, 2], length="x")) is DropReason.BAD_FIELD
 
 
 def test_non_integer_csi_is_rejected():
     line = c5c6_line(csi=[1, 2]).replace("[1,2]", "[1,2.5]")
-    assert parse(line) is None
+    assert drop_reason(line) is DropReason.BAD_CSI
+
+
+def test_data_that_is_not_a_list_is_rejected():
+    line = c5c6_line(csi=[1, 2]).replace('"[1,2]"', '"7"')
+    assert drop_reason(line) is DropReason.BAD_CSI
 
 
 def test_two_lines_run_together_are_rejected():
     # Happens when a newline is lost and the next line is appended
-    assert parse(c5c6_line(seq=1) + c5c6_line(seq=2)) is None
+    assert drop_reason(c5c6_line(seq=1) + c5c6_line(seq=2)) is DropReason.COLUMN_COUNT
 
 
 # Counter wraparound

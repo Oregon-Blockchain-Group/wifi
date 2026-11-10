@@ -36,7 +36,7 @@ def legacy_line(seq=0, mac="94:d9:b3:80:8c:81", rssi=-30, rate=11, sig_mode=1, m
                 ant=0, sig_len=67, csi=None, first_word_invalid=True, length=None) -> str:
     """A CSI_DATA line as printed by an ESP32/S2/S3/C3 receiver. Pass length to fake a mismatch."""
     csi = [0] * 128 if csi is None else csi
-    # The firmware prints sig_mode again in the rx_state column
+    # The firmware prints sig_mode again in the rx_format column
     return (f"CSI_DATA,{_i32(seq)},{mac},{rssi},{rate},{sig_mode},{mcs},{bandwidth},{smoothing},"
             f"{not_sounding},{aggregation},{stbc},{fec_coding},{sgi},{noise_floor},{ampdu_cnt},"
             f"{channel},{secondary_channel},{_i32(timestamp)},{ant},{sig_len},{sig_mode}"

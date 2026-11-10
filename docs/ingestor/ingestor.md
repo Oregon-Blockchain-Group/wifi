@@ -10,15 +10,29 @@ It only moves raw data. It does not interpret CSI or try to infer anything about
 
 ## Components
 
-The code in `ingestor/` is split into three parts:
+The code in `ingestor/` is split into these parts:
 
 | File | Responsibility |
 | --- | --- |
-| `reader.py` | Opens the serial connection to the receiver ESP and yields lines of text. |
+| `reader.py` | Opens the serial connection to the receiver ESP and yields lines of text. Reconnects if the port drops out. |
 | `parser.py` | Picks out the CSI lines, validates them, and turns each one into a structured CSI record. |
-| `uploader.py` | Batches parsed records and inserts them into Postgres. |
+| `uploader.py` | Batches parsed records and inserts them into Postgres. Not written yet. |
+| `main.py` | Entry point. Connects the other parts and logs stats. |
 
 The parser should not depend on the serial port. It should take lines in and give records out, so it can be tested against saved captures without the hardware plugged in.
+
+`main.py` runs two threads with a bounded queue between them. One reads and parses, and the other passes records to the uploader. The reader never blocks on the queue: if it fills up, records are dropped and counted, so a slow database can't stall the serial read. Until the uploader exists, records are discarded after being counted.
+
+## Running
+
+From `ingestor/`:
+
+```
+pip install -r requirements.txt
+python main.py /dev/ttyUSB0
+```
+
+Use `--baud` to change the baud rate, `--stats-interval` to change how often stats are logged, and `-v` to log every non-CSI and dropped line.
 
 ## Receiver Output
 
@@ -39,14 +53,16 @@ The columns depend on which chip the receiver is.
 **ESP32-C5 / C6 / C61** (15 columns):
 
 ```
-type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data
+type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_format,len,first_word,data
 ```
 
 **Older chips: ESP32, S2, S3, C3** (25 columns):
 
 ```
-type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,len,first_word,data
+type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_format,len,first_word,data
 ```
+
+These are the names the firmware prints in its header line. Espressif's `csi_data_read_parse.py` calls `rx_format` `rx_state`, but the value is a PHY format (`cur_bb_format` on C5/C6, `sig_mode` on older chips), so we use the firmware's name.
 
 The fields that matter most to us:
 
@@ -106,8 +122,9 @@ The ingestor should keep counts it can log periodically:
 
 - Records parsed
 - Lines dropped as garbled, and which check they failed
-- Gaps in `seq`, which indicate packets the receiver never got
-- Upload failures and retries
+- Gaps in `seq`, which indicate packets the receiver never got, and resets, which usually mean the sender rebooted
+- Records dropped because the queue was full
+- Upload failures and retries (not implemented yet)
 
 This doesn't solve missing or corrupted data, but it makes it visible, which the later processing work will need.
 
